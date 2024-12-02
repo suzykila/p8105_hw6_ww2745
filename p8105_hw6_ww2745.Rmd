@@ -1,0 +1,269 @@
+---
+title: "p8105_hw6_ww2745"
+author: "ww2745"
+date: "2024-11-28"
+output: github_document
+---
+```{r}
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(MASS)
+library(modelr)
+set.seed(1)
+
+```
+
+## Problem 1
+
+```{r load_data}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") |> 
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) |> 
+  dplyr::select(name, id, everything())
+```
+We’ll focus on a simple linear regression with tmax as the response and tmin as the predictor, and are interested in the distribution of two quantities estimated from these data:
+𝑟̂ 2
+log(𝛽̂ 0∗𝛽̂ 1)
+Use 5000 bootstrap samples and, for each bootstrap sample, produce estimates of these two quantities. Plot the distribution of your estimates, and describe these in words. 
+
+```{r}
+boot_strap = weather_df |>  
+  modelr::bootstrap(n = 5000) |> 
+  mutate(
+    mods = map(strap, ~lm(tmax ~ tmin + prcp, data = .x)),
+    mods_beta = map(mods, broom::glance),
+    mods_r2 = map(mods, broom::tidy)) |> 
+  unnest(mods_r2, mods_beta) |> 
+  dplyr::select(.id, term, estimate, r.squared) |>  
+  pivot_wider(names_from = term, values_from = estimate) |> 
+  rename(
+    beta_0 = `(Intercept)`,
+    beta_1 = tmin,
+    beta_2 = prcp) 
+
+res = boot_strap  |> 
+  summarise(r.squared = r.squared,
+    log_beta12 = log(beta_1 * beta_2))
+
+res_noNA = res  |> 
+  na.omit()
+
+head(res)
+```
+
+```{r}
+head(res_noNA)
+```
+
+```{r}
+r2_ci = 
+  quantile(pull(res,r.squared), probs = c(0.025,0.975)) |> 
+  knitr::kable()
+
+r2_ci_noNA = 
+  quantile(pull(res_noNA,r.squared), probs = c(0.025,0.975)) |> 
+  knitr::kable()
+
+log_ci = 
+  quantile(pull(res_noNA,log_beta12), probs = c(0.025,0.975)) |> 
+  knitr::kable()
+  
+r2_ci
+
+r2_ci_noNA
+
+log_ci
+
+r2_dist = res  |> 
+  ggplot(aes(x = r.squared)) +
+  geom_density() +
+  labs(title = "Distribution of estimates of r.squared", x = "r.squared estimates")
+
+r2_dist
+
+b1b2_dist = res_noNA |> 
+  ggplot(aes(x = log_beta12)) +
+  geom_density() +
+  labs(title = "Distribution of log(beta1*beta2)", x = "log(beta1*beta2)")
+
+b1b2_dist
+```
+
+
+## Problem 2
+```{r}
+homicide = 
+  read_csv(
+    "./data/homicide-data.csv")
+
+cleaned_homicide_data = homicide |> 
+  mutate(city_state = paste(city, state, sep = ", "))  |> 
+  mutate(solved_binary = ifelse(disposition == "Closed by arrest", 1, 0))  |> 
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL"))  |> 
+  filter(victim_race %in% c("White", "Black"))  |> 
+  mutate(victim_age = as.numeric(victim_age))  |> 
+  drop_na(victim_age, victim_race, solved_binary)
+
+print(cleaned_homicide_data)
+
+```
+
+```{r}
+balt = cleaned_homicide_data |> 
+  filter(city == "Baltimore") |> 
+  dplyr::select(solved_binary, victim_age, victim_race, victim_sex) |> 
+  mutate(victim_sex = fct_relevel(victim_sex, "Female"))
+
+balt_model = balt |> 
+  glm(solved_binary ~ victim_age + victim_race + victim_sex, data = _, family = binomial())
+
+balt_model |> 
+  broom::tidy() |> 
+  knitr::kable(digits = 3)
+```
+
+```{r}
+odd_ci_balt = balt_model |> 
+  broom::tidy() |> 
+  filter(term == 'victim_sexMale') |> 
+  summarise(estimate = estimate,
+            OR = exp(estimate),
+         OR_lower = exp(estimate - 1.96 * std.error),
+         OR_upper = exp(estimate + 1.96 * std.error) ) |> 
+  knitr::kable(digits = 3)
+
+odd_ci_balt
+```
+
+```{r}
+all_model = function(citystate){
+  city_glm =cleaned_homicide_data  |>  
+    filter(city_state == citystate) |>  
+    glm(solved_binary ~ victim_sex + victim_race + victim_age, family = binomial, data = _) |>  
+    broom::tidy() |>  
+    filter(term == "victim_sexMale") |> 
+    summarise(
+         estimate = estimate,
+         OR = exp(estimate), 
+         OR_lower = exp(estimate - 1.96*std.error), 
+         OR_upper = exp(estimate + 1.96*std.error))
+    
+    city_glm
+}
+```
+
+```{r}
+glm_all = cleaned_homicide_data |> 
+  dplyr::select(city_state) |> 
+  unique() |> 
+  mutate(glm = map(city_state, all_model)) |> 
+  unnest(glm) |> 
+  arrange(desc(OR))
+
+glm_all  |> 
+  knitr::kable(digits = 3)
+```
+
+```{r}
+ggplot(glm_all, aes(x=OR, y = fct_reorder(city_state, OR))) +
+  geom_point() +
+  geom_errorbar(aes(xmin = OR_lower, xmax = OR_upper)) +
+  labs(x = 'OR with 95% CI', y = 'city_state', title = 'Estimated ORs and CIs for each city') +
+  theme(axis.text.y = element_text(hjust = 1,size = 6))
+```
+
+## Problem 3
+```{r}
+bw = read.csv("./data/birthweight.csv")
+```
+
+```{r}
+birth = bw |> 
+  janitor::clean_names() |> 
+  mutate(babysex = case_when(babysex == 1 ~ 'male',
+                             babysex == 2 ~ 'female'),
+         frace = recode(frace, "1" = "White", "2" = "Black", "3" = "Asian", "4" = "Puerto Rican", "8" = "Other", "9" = "Unknown"),
+         malform = case_when(malform == 0 ~ 'absent',
+                             malform == 1 ~ 'present'),
+         mrace = recode(mrace, "1" = "White", "2" = "Black", "3" = "Asian", "4" = "Puerto Rican", "8" = "Other"))
+
+sum(is.na(birth))
+```
+
+No NAs in the dataset.
+
+First, I fit a model based on all data (babysex, bhead, blength, delwt, fincome, gaweeks, mheight, mrace, parity, ppwt and smoken) as predictors. In this case, I applied backward stepwise.
+```{r}
+# full model
+full_model = lm(bwt ~ ., data = birth) |> 
+  step(direction = "backward", trace = FALSE) 
+
+full_model |>  
+  broom::tidy() |> 
+  knitr::kable()
+```
+
+```{r}
+birth |> 
+    add_predictions(full_model) |> 
+    add_residuals(full_model) |> 
+    ggplot(aes(x = pred, y = resid)) +
+    geom_point()  + 
+    geom_smooth(method = "lm") + 
+    labs(title = "Residuals against fitted values", 
+       x = "Predicted", 
+       y = "Residuals")
+```
+
+The slope is 0, not easy to analyse.
+
+One using length at birth and gestational age as predictors (main effects only)
+```{r}
+model2 = lm(bwt ~ blength + gaweeks, data = birth)
+
+model2 |> 
+  broom::tidy() |>  
+  knitr::kable()
+```
+One using head circumference, length, sex, and all interactions (including the three-way interaction) between these
+```{r}
+model3 = lm(bwt ~ bhead * blength * babysex, data = birth)
+
+model3 |> 
+  broom::tidy() |> 
+  knitr::kable()
+```
+
+```{r}
+cv_birth = 
+    crossv_mc(birth, 100) |> 
+    mutate(train = map(train, as_tibble),
+           test = map(test,as_tibble)) |>  
+   mutate(fit1 = map(train,~full_model),
+          fit2 = map(train,~model2),
+         fit3 = map(train,~model3)) |> 
+    mutate(rmse_fit1 = map2_dbl(fit1, test, ~rmse(model = .x,data = .y)),
+           rmse_fit2 = map2_dbl(fit2, test, ~rmse(model = .x,data = .y)),
+           rmse_fit3 = map2_dbl(fit3, test, ~rmse(model = .x,data = .y))
+    )
+
+cv_birth |> 
+  dplyr::select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") |> 
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin()
+```
+The full model, using all predictors, shows the smallest RMSE, while fit2, with only length at birth and gestational age, has the largest RMSE.
